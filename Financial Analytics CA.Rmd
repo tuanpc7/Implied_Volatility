@@ -25,7 +25,7 @@ library(reshape2)
 
 # Import data
 ```{r}
-data <- read.csv("E:\\Knowledge\\Financial Analytics\\Data\\Sample_L2_2019_August\\L2_options_20190801.csv")
+data <- read.csv("Data.csv")
 str(data)
 ```
 

@@ -25,14 +25,12 @@ library(reshape2)
 
 # Import data
 ```{r}
-cc_raw <- read.csv("E:\\Knowledge\\Financial Analytics\\Data\\Sample_L2_2019_August\\L2_options_20190801.csv")
-str(cc_raw)
+data <- read.csv("E:\\Knowledge\\Financial Analytics\\Data\\Sample_L2_2019_August\\L2_options_20190801.csv")
+str(data)
 ```
 
 # Data preprocesing
 ```{r}
-data<-data.frame(list(cc_raw[,c(1,2,6:9,11,12,15)]))
-
 # Change format to date type
 data$Expiration <- format(mdy(data$Expiration))
 data$DataDate <- format(mdy(data$DataDate))

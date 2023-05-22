@@ -1,0 +1,258 @@
+---
+title: "CA"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+#load packages
+
+```{r}
+library(quantmod)
+library(OptionPricing)
+library(derivmkts)
+library(optionstrat)
+library(dplyr)
+library(tidyquant)
+library(tidyverse)
+library(plotly)
+library(akima)
+library(reshape2)
+
+```
+
+# Import data
+```{r}
+cc_raw <- read.csv("E:\\Knowledge\\Financial Analytics\\Data\\Sample_L2_2019_August\\L2_options_20190801.csv")
+str(cc_raw)
+```
+
+# Data preprocesing
+```{r}
+data<-data.frame(list(cc_raw[,c(1,2,6:9,11,12,15)]))
+
+# Change format to date type
+data$Expiration <- format(mdy(data$Expiration))
+data$DataDate <- format(mdy(data$DataDate))
+
+# Sort for AAPL stock and get Call option
+bsmvol <- data %>% filter_all(any_vars((. %in% c("AAPL"))))
+bsmvol <- bsmvol %>% filter_all(any_vars((. %in% c("call"))))
+
+# Process the AAPL call option result
+bsmvol$Expiration <- as.Date(bsmvol$Expiration)
+bsmvol$DataDate <- as.Date(bsmvol$DataDate)
+bsmvol$time2matu <- (bsmvol$Expiration - bsmvol$DataDate)/365
+bsmvol$time2matu <- as.numeric(bsmvol$time2matu)
+bsmvol$time2matuDay <- bsmvol$time2matu*365
+str(bsmvol)
+```
+# Get US risk free rate (10 years bond rate)
+```{r}
+getSymbols.FRED("DGS10", env = globalenv(), ) #US risk free rate
+```
+# Create function to calculate implied volatulity
+```{r}
+volOptimFun <- function(sigma, price, S, K, r, q, ttm, type){
+  abs(price - bscall(S,K, sigma,r,ttm,q))
+}
+
+iv <- function(ttm, K) {
+  p=0
+# The loop below will use ttm and K inputed to find other information includes in bsmvol: market price = (bid+ask)/2, stockprice = price of underlying asset, rr = 10 years treasury rate extracted from DGS10, ti2ma = time to maturity/365, ty = type call option
+  for (i in (1:nrow(bsmvol))) {
+    if ((bsmvol$time2matuDay[i] == ttm) & (bsmvol$Strike[i] == K)) {
+      p <- (bsmvol$Bid[i] + bsmvol$Ask[i])/2
+      stockprice <- bsmvol$UnderlyingPrice[i] 
+      rr <-as.numeric(DGS10[bsmvol$DataDate[i]]/100)  
+      ti2ma <- bsmvol$time2matu[i]
+      ty <- "call"
+    }
+  }
+  a=0
+  a <- as.list(a)
+# If cannot find the match ttm and K inputed, the fuction return NA, if not, the information found will be used to calcualted implied volatility
+  ifelse(p == 0, a$minimum <- NA, a <- optimize(volOptimFun, interval = c(0,1), price = p, S= stockprice, K=K, r = rr, q=0.0135, ttm = ttm, type =ty))
+  #  Return implied volatility as the output of the function
+  return(a$minimum)
+}
+```
+# Calculate implied volatulity using assign function
+```{r}
+# Create a matrix that have value in column is Strike price and row is Time to maturity the value in the matrix is NA.
+x <- sort(unique(bsmvol$time2matuDay))
+y <- sort(unique(bsmvol$Strike))
+namesx <- as.character(x)
+namesy <- as.character(y)
+dataiv <- matrix(NA, ncol = length(y), nrow = length(x), dimnames = list(namesx, namesy))
+
+# Calculate implied volatility using function iv above for the matrix
+for (i in (1:ncol(dataiv))) {
+  for (j in (1:nrow(dataiv))) {
+    dataiv[j,i] <- iv(as.numeric(rownames(dataiv)[j]), as.numeric(colnames(dataiv)[i]))
+  }
+}
+
+# Remove columns that have total NA value larger than 80% of total value in that columns
+df <- tibble(x=0)
+for (i in (1:ncol(dataiv))) {
+  a <- length(which(is.na(dataiv[,i])))/length(dataiv[,i])
+  if (a>0.8)  {ifelse(df==0, df <- tibble(x=i), df <- add_row(df, x=i))}
+}
+a2 <- as.vector(df$x)
+dataiv <- dataiv[,-c(a2)]
+
+# Print the implied volatility matrix
+dataiv
+```
+# Deal with missing value in volatulity matrix
+```{r setup, warning=FALSE}
+# As can be seen above, even when we remove columns that have more than 80% NA value. There still many NA value in the matrix. Thus I perform the interpolation from akima package to replace NA value.
+
+#get coordinates of NAs in grid
+toInterpolate <- which(is.na(dataiv))
+coords <- cbind(toInterpolate%%dim(dataiv)[1], toInterpolate%/%dim(dataiv)[1] + 1)
+coords[coords[,1] == 0, 2] <- coords[coords[,1] == 0, 2] - 1 
+coords[coords[,1] == 0, 1] <- dim(dataiv)[1]
+#loop through NAs and interpolate
+for(i in 1:nrow(coords)){
+  #get the coordinates of a 10x10 area around the missing value
+  x1 <- max(coords[i,1] - 10, 1)
+  x2 <- min(coords[i,1] + 10, dim(dataiv)[1])
+  y1 <- max(coords[i,2] - 10, 1)
+  y2 <- min(coords[i,2] + 10, dim(dataiv)[2])
+  
+  #get the moneyness/time to mat combination of the missing value
+  x0 <- as.numeric(rownames(dataiv)[coords[i,1]])
+  y0 <- as.numeric(colnames(dataiv)[coords[i,2]])
+  
+  #get the part of the grid that is used to interpolate and remove all missing values that are present
+  interpGrid <- dataiv[x1:x2,y1:y2]
+  interpGrid <- melt(interpGrid)
+  interpGrid <- na.omit(interpGrid)
+  
+  #interpolate linearly
+  interpVal <- interp(x = interpGrid$Var1, y = interpGrid$Var2, z = interpGrid$value,
+                      xo = x0, yo = y0,
+                      linear = TRUE, extrap = TRUE)$z[1,1]
+  
+  #if linear interpolation doesnt yield a result, use spline interpolation
+  if(is.na(interpVal)){
+    interpVal <- interp(x = interpGrid$Var1, y = interpGrid$Var2, z = interpGrid$value,
+                        xo = x0, yo = y0,
+                        linear = FALSE, extrap = TRUE)$z[1,1]
+  }
+  
+  #if the resulting value is clearly wrong, e.g. negative or way outside the values that are used to interpolate,
+  #leave it as NA
+  if(interpVal < 0 | interpVal > max(interpGrid$value * 1.5)){
+    interpVal <- NA
+  }
+  
+  #replace the value with the result of the interpolation
+  dataiv[coords[i,1],coords[i,2]] <- interpVal
+}
+
+# Change rownames and colnames to Moneyness = S/K and Time to maturity 
+rownames(dataiv) <- as.numeric(rownames(dataiv))
+colnames(dataiv) <- as.numeric(colnames(dataiv))
+colnames(dataiv) <- (bsmvol$UnderlyingPrice[1]/as.numeric(colnames(dataiv)))
+rownames(dataiv) <- as.numeric(rownames(dataiv))/365
+
+
+```
+# PLot the resulting implied volatility surface
+```{r}
+# Navigate the implied volatility surface after replace the NA value
+dataiv
+
+# Setup up for the plotly
+xaxx <- list(
+  gridcolor='rgb(255, 255, 255)',
+  zerolinecolor='rgb(255, 255, 255)',
+  showbackground=TRUE,
+  backgroundcolor='rgb(230, 230,230)',
+  title = "Time to maturity"
+)
+
+yaxx <- list(
+  gridcolor='rgb(255, 255, 255)',
+  zerolinecolor='rgb(255, 255, 255)',
+  showbackground=TRUE,
+  backgroundcolor='rgb(230, 230,230)',
+  title = "Moneyness"
+)
+
+zaxx <- list(
+  gridcolor='rgb(255, 255, 255)',
+  zerolinecolor='rgb(255, 255, 255)',
+  showbackground=TRUE,
+  backgroundcolor='rgb(230, 230,230)',
+  tickformat = "%",
+  title = "Implied Volatility"
+)
+
+# Draw the 3D graph
+fig <- plot_ly(x = rownames(dataiv)   , y = colnames(dataiv)  , z = dataiv)
+fig <- fig %>% add_surface()
+fig <- fig %>% layout(scene = list(xaxis=xaxx, yaxis=yaxx, zaxis = zaxx))
+fig <- fig %>% plotly::colorbar(title = "", x = 0.9, y = 0.75, tickformat = "%")
+fig
+```
+
+# Apply BSM to Banking, Technology and Energy sectors
+```{r}
+# For Banking, I choose BAC as it is one of the biggest bank in US Banking market and for Technology and Energy, I choose AAPL and OXY
+# Create funtion to calculate option price
+optionevaluate <- function(sticker) {
+datapro<-data %>% filter_all(any_vars(. %in% c(sticker)))
+#datapro$Expiration <- format(ymd(datapro$Expiration))
+#datapro$DataDate <- format(ymd(datapro$DataDate))
+a<-as.Date(datapro$DataDate)
+b<-as.Date(datapro$Expiration)
+datapro$marketprice <- (datapro$Bid + datapro$Ask)/2
+for (i in 1:nrow(datapro)) {
+  c<-a[i]-365
+  d<-a[i]+1
+  stock<- tq_get(datapro$UnderlyingSymbol[i],get = "stock.prices", from = c, to = d)
+  retur <-stock$close
+  n<- length(retur)
+  ret <- retur[-n]/retur[-1]-1
+  datapro$options[i]<- round( ifelse (datapro$Type[i]=="call",
+          bscall(s=datapro$UnderlyingPrice[i], k=datapro$Strike[i], v=sd(ret), r =(DGS10[datapro$DataDate[i]]/100), tt= as.numeric((b[i]-a[i])/365),d=0),
+          bsput(s=datapro$UnderlyingPrice[i], k=datapro$Strike[i], v=sd(ret), r =(DGS10[datapro$DataDate[i]]/100), tt= as.numeric((b[i]-a[i])/365),d=0)), digits = 2)
+}
+return(datapro)
+}
+
+# Technology AAPL
+AAPL <- optionevaluate("AAPL")
+rmseTECH <- sqrt(mean((AAPL$marketprice - AAPL$options)^2))
+# Plot option price and market price
+plot(AAPL$marketprice, AAPL$options)
+rmseTECH/mean(AAPL$marketprice)
+
+
+# Bank BAC
+BAC <- optionevaluate("BAC")
+rmseBANK <- sqrt(mean((BAC$marketprice - BAC$options)^2))
+plot(BAC$marketprice, BAC$options)
+rmseBANK/mean(BAC$marketprice)
+
+
+# Energy OXY
+OXY <- optionevaluate("OXY")
+rmseENERGY <- sqrt(mean((OXY$marketprice - OXY$options)^2))
+plot(OXY$marketprice, OXY$options)
+rmseENERGY/mean(OXY$marketprice)
+
+
+
+```
+
+
+
+
+.
